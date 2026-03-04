@@ -98,8 +98,8 @@ cmd_start() {
     "${port_args[@]+"${port_args[@]}"}" \
     -v "${VOLUME_WORKSPACE}:/workspace" \
     -v "${VOLUME_DOCKER}:/var/lib/docker" \
-    -v "${HOME}/.claude:/home/claude/.claude" \
-    -v "${HOME}/.claude.json:/home/claude/.claude.json" \
+    -v "${HOME}/.claude:/root/.claude" \
+    -v "${HOME}/.claude.json:/root/.claude.json" \
     "${mount_args[@]+"${mount_args[@]}"}" \
     "$IMAGE_NAME" \
     sleep infinity
