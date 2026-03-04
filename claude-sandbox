@@ -104,6 +104,13 @@ cmd_start() {
     "$IMAGE_NAME" \
     sleep infinity
 
+  # Grant claude user access to /root/.claude (mounted from host)
+  docker exec "$CONTAINER_NAME" usermod -aG root claude
+  docker exec "$CONTAINER_NAME" chmod 750 /root
+
+  # Symlink host macOS home path so plugin cache paths resolve inside container
+  docker exec "$CONTAINER_NAME" bash -c 'mkdir -p /Users && ln -sf /home/claude /Users/'"$(whoami)"
+
   # Wait for internal Docker daemon (max 30s)
   echo "Waiting for internal Docker daemon..."
   local elapsed=0
