@@ -36,5 +36,5 @@ claude --dangerously-skip-permissions
 ## Design Docs
 
 - `docs/plans/2026-03-03-claude-docker-sandbox-design.md` — 아키텍처 설계 및 트레이드오프 분석
-- `doc/brainstorming.md` — 초기 리서치 (Vagrant, Docker, VM 비교)
-- `doc/brainstorming2.md` — 커뮤니티 샌드박싱 접근법 수집
+- `docs/brainstorming.md` — 초기 리서치 (Vagrant, Docker, VM 비교)
+- `docs/brainstorming2.md` — 커뮤니티 샌드박싱 접근법 수집

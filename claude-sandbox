@@ -99,7 +99,6 @@ cmd_start() {
     -v "${VOLUME_WORKSPACE}:/workspace" \
     -v "${VOLUME_DOCKER}:/var/lib/docker" \
     -v "${HOME}/.claude:/root/.claude" \
-    -v "${HOME}/.claude.json:/root/.claude.json" \
     "${mount_args[@]+"${mount_args[@]}"}" \
     "$IMAGE_NAME" \
     sleep infinity
@@ -110,6 +109,13 @@ cmd_start() {
 
   # Symlink host macOS home path so plugin cache paths resolve inside container
   docker exec "$CONTAINER_NAME" bash -c 'mkdir -p /Users && ln -sf /home/claude /Users/'"$(whoami)"
+
+  # Copy config files into container (avoid bind mount — atomic writes break mount)
+  local script_dir
+  script_dir="$(cd "$(dirname "$0")" && pwd)"
+  docker cp "${HOME}/.claude.json" "${CONTAINER_NAME}:/home/claude/.claude.json"
+  docker cp "${script_dir}/.tmux.conf" "${CONTAINER_NAME}:/home/claude/.tmux.conf"
+  docker exec "$CONTAINER_NAME" chown claude:claude /home/claude/.claude.json /home/claude/.tmux.conf
 
   # Wait for internal Docker daemon (max 30s)
   echo "Waiting for internal Docker daemon..."
