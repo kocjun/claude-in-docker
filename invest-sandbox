@@ -1,0 +1,226 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ── Constants ──────────────────────────────────────────────────────
+CONTAINER_NAME="invest-sandbox"
+IMAGE_NAME="claude-sandbox"
+VOLUME_DOCKER="invest-sandbox-docker-data"
+HOST_WORKSPACE="/Users/yeongchang.jeon/workspace/investment-assistant"
+
+# ── Helpers ────────────────────────────────────────────────────────
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") <command> [options]
+
+Commands:
+  start [options]  Start the sandbox
+    -p HOST:CONTAINER   Port mapping (repeatable)
+    -m HOST_PATH:CONTAINER_PATH  Bind mount (repeatable)
+  shell              Open an interactive bash shell inside the running sandbox
+  stop               Stop the sandbox container (data is preserved)
+  destroy            Remove the container and delete all volumes (data lost!)
+  commit             Save current container state to image (preserves installed packages)
+  rebuild            Force rebuild image from Dockerfile (discards commit snapshots)
+  status             Show current sandbox status
+
+Examples:
+  $(basename "$0") start
+  $(basename "$0") start -p 8080:8080
+  $(basename "$0") start -m ~/data:/workspace/data
+EOF
+}
+
+container_state() {
+  docker inspect -f '{{.State.Status}}' "$CONTAINER_NAME" 2>/dev/null || echo "not_found"
+}
+
+# ── Commands ───────────────────────────────────────────────────────
+cmd_start() {
+  local state
+  state="$(container_state)"
+
+  if [[ "$state" == "running" ]]; then
+    echo "Sandbox is already running."
+    return
+  fi
+
+  if [[ "$state" == "exited" || "$state" == "created" ]]; then
+    echo "Restarting existing sandbox container..."
+    docker start "$CONTAINER_NAME"
+    echo "Sandbox started."
+    return
+  fi
+
+  # 옵션 수집
+  local port_args=()
+  local mount_args=()
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -p) port_args+=("-p" "$2"); shift 2 ;;
+      -m) mount_args+=("-v" "$2"); shift 2 ;;
+      *)  echo "Unknown option: $1"; usage; exit 1 ;;
+    esac
+  done
+
+  # 이미지가 없을 때만 빌드 (commit된 이미지가 있으면 재사용)
+  if ! docker image inspect "$IMAGE_NAME" &>/dev/null; then
+    local dockerfile_dir
+    dockerfile_dir="$(cd "$(dirname "$0")/../tools/claude-in-docker" 2>/dev/null && pwd)" \
+      || dockerfile_dir="${HOME}/tools/claude-in-docker"
+    if [[ ! -f "${dockerfile_dir}/Dockerfile" ]]; then
+      echo "ERROR: Dockerfile not found at ${dockerfile_dir}/Dockerfile"
+      echo "Please build the base image first: cd ~/tools/claude-in-docker && ./claude-sandbox rebuild"
+      exit 1
+    fi
+    echo "Building image ${IMAGE_NAME} from ${dockerfile_dir}..."
+    docker build -t "$IMAGE_NAME" "$dockerfile_dir"
+  else
+    echo "Using existing image ${IMAGE_NAME}."
+  fi
+
+  # Linux 호스트 경고
+  if [[ "$(uname)" == "Linux" ]]; then
+    echo "WARNING: --privileged on Linux grants full host kernel access."
+    echo "This sandbox is designed for macOS Docker Desktop (LinuxKit VM boundary)."
+    read -p "Continue anyway? [y/N] " confirm
+    if [[ "${confirm,,}" != "y" ]]; then
+      echo "Aborted."
+      return 1
+    fi
+  fi
+
+  # Create + start container
+  echo "Creating sandbox container..."
+  if [[ ${#port_args[@]} -gt 0 ]]; then
+    echo "Port mappings: ${port_args[*]}"
+  fi
+  if [[ ${#mount_args[@]} -gt 0 ]]; then
+    echo "Extra mounts: ${mount_args[*]}"
+  fi
+  docker run -d \
+    --name "$CONTAINER_NAME" \
+    --privileged \
+    "${port_args[@]+"${port_args[@]}"}" \
+    -v "${HOST_WORKSPACE}:/workspace/investment-assistant" \
+    -v "${VOLUME_DOCKER}:/var/lib/docker" \
+    -v "${HOME}/.claude:/root/.claude" \
+    "${mount_args[@]+"${mount_args[@]}"}" \
+    "$IMAGE_NAME" \
+    sleep infinity
+
+  # Grant claude user access to /root/.claude (mounted from host)
+  docker exec "$CONTAINER_NAME" usermod -aG root claude
+  docker exec "$CONTAINER_NAME" chmod 750 /root
+
+  # Symlink host macOS home path so plugin cache paths resolve inside container
+  docker exec "$CONTAINER_NAME" bash -c 'mkdir -p /Users && ln -sf /home/claude /Users/'"$(whoami)"
+
+  # Copy config files into container (avoid bind mount — atomic writes break mount)
+  local claude_docker_dir="${HOME}/tools/claude-in-docker"
+  docker cp "${HOME}/.claude.json" "${CONTAINER_NAME}:/home/claude/.claude.json"
+  if [[ -f "${claude_docker_dir}/.tmux.conf" ]]; then
+    docker cp "${claude_docker_dir}/.tmux.conf" "${CONTAINER_NAME}:/home/claude/.tmux.conf"
+  fi
+  docker exec "$CONTAINER_NAME" chown claude:claude /home/claude/.claude.json
+  docker exec "$CONTAINER_NAME" bash -c 'test -f /home/claude/.tmux.conf && chown claude:claude /home/claude/.tmux.conf || true'
+
+  # Wait for internal Docker daemon (max 30s)
+  echo "Waiting for internal Docker daemon..."
+  local elapsed=0
+  while ! docker exec "$CONTAINER_NAME" docker info &>/dev/null; do
+    elapsed=$((elapsed + 1))
+    if [[ $elapsed -ge 30 ]]; then
+      echo "ERROR: Internal Docker daemon did not become ready within 30s."
+      exit 1
+    fi
+    sleep 1
+  done
+
+  echo "Sandbox is ready. Workspace mounted at /workspace/investment-assistant"
+}
+
+cmd_shell() {
+  if [[ "$(container_state)" != "running" ]]; then
+    echo "ERROR: Sandbox is not running. Run '$(basename "$0") start' first." >&2
+    exit 1
+  fi
+  docker exec -it -u claude -w /workspace/investment-assistant "$CONTAINER_NAME" bash
+}
+
+cmd_stop() {
+  if [[ "$(container_state)" != "running" ]]; then
+    echo "Sandbox is not running."
+    return
+  fi
+  docker stop "$CONTAINER_NAME"
+  echo "Sandbox stopped. Data preserved."
+}
+
+cmd_destroy() {
+  echo "WARNING: This will delete the sandbox container and Docker volume."
+  echo "Host workspace (${HOST_WORKSPACE}) is NOT deleted."
+  read -p "Are you sure? [y/N] " confirm
+  if [[ "${confirm,,}" != "y" ]]; then
+    echo "Aborted."
+    return
+  fi
+
+  docker rm -f "$CONTAINER_NAME" 2>/dev/null || true
+  docker volume rm "$VOLUME_DOCKER" 2>/dev/null || true
+  echo "Sandbox destroyed."
+}
+
+cmd_commit() {
+  if [[ "$(container_state)" != "running" ]]; then
+    echo "ERROR: Sandbox is not running." >&2
+    exit 1
+  fi
+  echo "Committing current container state to image..."
+  docker commit "$CONTAINER_NAME" "$IMAGE_NAME"
+  echo "Done. Next 'start' will use this snapshot."
+}
+
+cmd_rebuild() {
+  local dockerfile_dir="${HOME}/tools/claude-in-docker"
+  if [[ ! -f "${dockerfile_dir}/Dockerfile" ]]; then
+    echo "ERROR: Dockerfile not found at ${dockerfile_dir}/Dockerfile"
+    exit 1
+  fi
+  echo "Rebuilding image from Dockerfile..."
+  docker build -t "$IMAGE_NAME" "$dockerfile_dir"
+  echo "Done. Destroy and start to use the new image."
+}
+
+cmd_status() {
+  local state
+  state="$(container_state)"
+
+  case "$state" in
+    running)
+      echo "Status: RUNNING"
+      local docker_ver
+      docker_ver="$(docker exec "$CONTAINER_NAME" docker --version 2>/dev/null || echo "unknown")"
+      echo "Internal Docker: ${docker_ver}"
+      echo "Host workspace: ${HOST_WORKSPACE}"
+      echo "Container path: /workspace/investment-assistant"
+      ;;
+    exited|created)
+      echo "Status: STOPPED"
+      ;;
+    *)
+      echo "Status: NOT CREATED"
+      ;;
+  esac
+}
+
+# ── Main ───────────────────────────────────────────────────────────
+case "${1:-}" in
+  start)   shift; cmd_start "$@" ;;
+  shell)   cmd_shell ;;
+  stop)    cmd_stop ;;
+  destroy) cmd_destroy ;;
+  commit)  cmd_commit ;;
+  rebuild) cmd_rebuild ;;
+  status)  cmd_status ;;
+  *)       usage; exit 1 ;;
+esac
